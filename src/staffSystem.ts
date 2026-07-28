@@ -10,29 +10,19 @@ import {
   GuildMember,
   Interaction,
   PermissionFlagsBits,
+  Role,
   SlashCommandBuilder,
-  type GuildTextBasedChannel,
-  type Role,
+  TextBasedChannel,
 } from "discord.js";
+
 import fs from "node:fs";
 import path from "node:path";
 
 /* =========================================================
-   TEMİZ YETKİLİ NUMARA + GÖREV SİSTEMİ
+   YETKİLİ NUMARA + GÖREV SİSTEMİ
 ========================================================= */
 
-const DATA_DIR = path.resolve(process.cwd(), "data");
-const DATA_FILE = path.join(DATA_DIR, "staff-system.json");
-
-const STAFF_ROLE_NAME = "Yetkili";
-const DUTY_ROLE_NAME = "Görevde";
-const CATEGORY_NAME = "YETKİLİ SİSTEMİ";
-const PANEL_CHANNEL_NAME = "yetkili-panel";
-
-const NUMBER_BUTTON_ID = "staff:number";
-const DUTY_BUTTON_ID = "staff:duty";
-
-interface GuildSettings {
+interface GuildStaffSettings {
   staffRoleId: string;
   dutyRoleId: string;
   panelChannelId: string;
@@ -40,48 +30,109 @@ interface GuildSettings {
   numbers: Record<string, number>;
 }
 
-interface Database {
-  guilds: Record<string, GuildSettings>;
+interface StaffDatabase {
+  guilds: Record<string, GuildStaffSettings>;
 }
 
-let database: Database = loadDatabase();
+interface StaffResult {
+  member: GuildMember;
+  settings: GuildStaffSettings;
+}
 
-function loadDatabase(): Database {
+const DATA_DIR = path.resolve(process.cwd(), "data");
+const DATA_FILE = path.join(DATA_DIR, "staff-system.json");
+
+const STAFF_ROLE_NAME = "Yetkili";
+const DUTY_ROLE_NAME = "Görevde";
+
+const CATEGORY_NAME = "YETKİLİ SİSTEMİ";
+const PANEL_CHANNEL_NAME = "yetkili-panel";
+
+const NUMBER_BUTTON_ID = "staff:number";
+const DUTY_BUTTON_ID = "staff:duty";
+
+let database: StaffDatabase = loadDatabase();
+
+/* =========================================================
+   VERİTABANI
+========================================================= */
+
+function loadDatabase(): StaffDatabase {
   try {
     if (!fs.existsSync(DATA_FILE)) {
-      return { guilds: {} };
+      return {
+        guilds: {},
+      };
     }
 
-    const parsed = JSON.parse(fs.readFileSync(DATA_FILE, "utf8")) as Database;
+    const fileContent = fs.readFileSync(DATA_FILE, "utf8");
+    const parsed = JSON.parse(fileContent) as Partial<StaffDatabase>;
 
-    return parsed?.guilds
-      ? parsed
-      : { guilds: {} };
+    if (!parsed.guilds) {
+      return {
+        guilds: {},
+      };
+    }
+
+    return {
+      guilds: parsed.guilds,
+    };
   } catch (error) {
     console.error("❌ Yetkili sistemi veritabanı okunamadı:", error);
-    return { guilds: {} };
+
+    return {
+      guilds: {},
+    };
   }
 }
 
 function saveDatabase(): void {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(DATA_FILE, JSON.stringify(database, null, 2), "utf8");
+  try {
+    fs.mkdirSync(DATA_DIR, {
+      recursive: true,
+    });
+
+    fs.writeFileSync(
+      DATA_FILE,
+      JSON.stringify(database, null, 2),
+      "utf8",
+    );
+  } catch (error) {
+    console.error("❌ Yetkili sistemi veritabanı kaydedilemedi:", error);
+  }
 }
+
+/* =========================================================
+   İSİM VE NUMARA İŞLEMLERİ
+========================================================= */
 
 function cleanName(name: string): string {
   return name.replace(/^\[\d+\]\s*-\s*/u, "").trim() || "Yetkili";
 }
 
-function createNickname(number: number, member: GuildMember): string {
-  const baseName = cleanName(
+function createNickname(
+  number: number,
+  member: GuildMember,
+): string {
+  const originalName =
     member.nickname ??
-      member.user.globalName ??
-      member.user.username,
+    member.user.globalName ??
+    member.user.username;
+
+  const baseName = cleanName(originalName);
+  const prefix = `[${number}] - `;
+
+  const maximumNameLength = Math.max(
+    1,
+    32 - prefix.length,
   );
 
-  const prefix = `[${number}] - `;
-  return `${prefix}${baseName.slice(0, Math.max(1, 32 - prefix.length))}`;
+  return `${prefix}${baseName.slice(0, maximumNameLength)}`;
 }
+
+/* =========================================================
+   ROL VE KANAL İŞLEMLERİ
+========================================================= */
 
 async function findOrCreateRole(
   guild: Guild,
@@ -89,14 +140,14 @@ async function findOrCreateRole(
 ): Promise<Role> {
   await guild.roles.fetch();
 
-  const existing = guild.roles.cache.find(
+  const existingRole = guild.roles.cache.find(
     (role) =>
       role.name.toLocaleLowerCase("tr-TR") ===
       name.toLocaleLowerCase("tr-TR"),
   );
 
-  if (existing) {
-    return existing;
+  if (existingRole) {
+    return existingRole;
   }
 
   return guild.roles.create({
@@ -108,15 +159,21 @@ async function findOrCreateRole(
 async function getTextChannel(
   guild: Guild,
   channelId: string,
-): Promise<GuildTextBasedChannel | null> {
-  const channel = await guild.channels.fetch(channelId).catch(() => null);
+): Promise<TextBasedChannel | null> {
+  const channel = await guild.channels
+    .fetch(channelId)
+    .catch(() => null);
 
   if (!channel || !channel.isTextBased()) {
     return null;
   }
 
-  return channel as GuildTextBasedChannel;
+  return channel;
 }
+
+/* =========================================================
+   PANEL
+========================================================= */
 
 function createPanel() {
   const embed = new EmbedBuilder()
@@ -137,18 +194,20 @@ function createPanel() {
       text: "Her kullanıcı yalnızca bir numara alabilir.",
     });
 
-  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-    new ButtonBuilder()
-      .setCustomId(NUMBER_BUTTON_ID)
-      .setLabel("Numaramı Al")
-      .setEmoji("🔢")
-      .setStyle(ButtonStyle.Success),
-    new ButtonBuilder()
-      .setCustomId(DUTY_BUTTON_ID)
-      .setLabel("Görev Al")
-      .setEmoji("📋")
-      .setStyle(ButtonStyle.Primary),
-  );
+  const row =
+    new ActionRowBuilder<ButtonBuilder>().addComponents(
+      new ButtonBuilder()
+        .setCustomId(NUMBER_BUTTON_ID)
+        .setLabel("Numaramı Al")
+        .setEmoji("🔢")
+        .setStyle(ButtonStyle.Success),
+
+      new ButtonBuilder()
+        .setCustomId(DUTY_BUTTON_ID)
+        .setLabel("Görev Al")
+        .setEmoji("📋")
+        .setStyle(ButtonStyle.Primary),
+    );
 
   return {
     embeds: [embed],
@@ -156,21 +215,42 @@ function createPanel() {
   };
 }
 
+/* =========================================================
+   SİSTEM KURULUMU
+========================================================= */
+
 export async function ensureStaffSystemSetup(
   guild: Guild,
-): Promise<GuildSettings> {
+): Promise<GuildStaffSettings> {
   const botMember = guild.members.me;
 
-  if (!botMember?.permissions.has(PermissionFlagsBits.ManageRoles)) {
+  if (
+    !botMember?.permissions.has(
+      PermissionFlagsBits.ManageRoles,
+    )
+  ) {
     throw new Error("Botta Rolleri Yönet yetkisi yok.");
   }
 
-  if (!botMember.permissions.has(PermissionFlagsBits.ManageChannels)) {
+  if (
+    !botMember.permissions.has(
+      PermissionFlagsBits.ManageChannels,
+    )
+  ) {
     throw new Error("Botta Kanalları Yönet yetkisi yok.");
   }
 
-  const staffRole = await findOrCreateRole(guild, STAFF_ROLE_NAME);
-  const dutyRole = await findOrCreateRole(guild, DUTY_ROLE_NAME);
+  const staffRole = await findOrCreateRole(
+    guild,
+    STAFF_ROLE_NAME,
+  );
+
+  const dutyRole = await findOrCreateRole(
+    guild,
+    DUTY_ROLE_NAME,
+  );
+
+  await guild.channels.fetch();
 
   let category = guild.channels.cache.find(
     (channel) =>
@@ -229,23 +309,28 @@ export async function ensureStaffSystemSetup(
     });
   }
 
-  const previous = database.guilds[guild.id];
+  const previousSettings = database.guilds[guild.id];
 
-  const settings: GuildSettings = {
+  const settings: GuildStaffSettings = {
     staffRoleId: staffRole.id,
     dutyRoleId: dutyRole.id,
     panelChannelId: panelChannel.id,
-    nextNumber: previous?.nextNumber ?? 1,
-    numbers: previous?.numbers ?? {},
+    nextNumber: previousSettings?.nextNumber ?? 1,
+    numbers: previousSettings?.numbers ?? {},
   };
 
   database.guilds[guild.id] = settings;
   saveDatabase();
 
-  const channel = await getTextChannel(guild, panelChannel.id);
+  const channel = await getTextChannel(
+    guild,
+    panelChannel.id,
+  );
 
   if (!channel) {
-    throw new Error("Yetkili panel kanalı kullanılamıyor.");
+    throw new Error(
+      "Yetkili panel kanalı kullanılamıyor.",
+    );
   }
 
   await channel.send(createPanel());
@@ -253,30 +338,44 @@ export async function ensureStaffSystemSetup(
   return settings;
 }
 
+/* =========================================================
+   SLASH KOMUTU
+========================================================= */
+
 export const staffSystemCommands = [
   new SlashCommandBuilder()
     .setName("yetkili-panel")
-    .setDescription("Yetkili panelini kurar veya tekrar gönderir.")
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild),
+    .setDescription(
+      "Yetkili panelini kurar veya tekrar gönderir.",
+    )
+    .setDefaultMemberPermissions(
+      PermissionFlagsBits.ManageGuild,
+    ),
 ];
+
+/* =========================================================
+   YETKİLİ KONTROLÜ
+========================================================= */
 
 async function requireStaff(
   interaction: ButtonInteraction,
-): Promise<{
-  member: GuildMember;
-  settings: GuildSettings;
-} | null> {
+): Promise<StaffResult | null> {
   if (!interaction.guild || !interaction.guildId) {
-    await interaction.editReply("❌ Sunucu bilgisi alınamadı.");
+    await interaction.editReply(
+      "❌ Sunucu bilgisi alınamadı.",
+    );
+
     return null;
   }
 
-  const settings = database.guilds[interaction.guildId];
+  const settings =
+    database.guilds[interaction.guildId];
 
   if (!settings) {
     await interaction.editReply(
-      "❌ Sistem kurulu değil. Yönetici `/kurulum` yazmalı.",
+      "❌ Sistem kurulu değil. Yönetici `/yetkili-panel` komutunu kullanmalı.",
     );
+
     return null;
   }
 
@@ -285,24 +384,39 @@ async function requireStaff(
     .catch(() => null);
 
   if (!member) {
-    await interaction.editReply("❌ Üyelik bilgin alınamadı.");
+    await interaction.editReply(
+      "❌ Üyelik bilgin alınamadı.",
+    );
+
     return null;
   }
 
-  if (!member.roles.cache.has(settings.staffRoleId)) {
+  if (
+    !member.roles.cache.has(settings.staffRoleId)
+  ) {
     await interaction.editReply(
       "❌ Yetkili rolüne sahip değilsin.",
     );
+
     return null;
   }
 
-  return { member, settings };
+  return {
+    member,
+    settings,
+  };
 }
+
+/* =========================================================
+   NUMARAMI AL BUTONU
+========================================================= */
 
 async function handleNumberButton(
   interaction: ButtonInteraction,
 ): Promise<void> {
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({
+    ephemeral: true,
+  });
 
   const result = await requireStaff(interaction);
 
@@ -311,12 +425,15 @@ async function handleNumberButton(
   }
 
   const { member, settings } = result;
-  const existingNumber = settings.numbers[member.id];
+
+  const existingNumber =
+    settings.numbers[member.id];
 
   if (existingNumber !== undefined) {
     await interaction.editReply(
       `ℹ️ Zaten **${existingNumber}** numarasına sahipsin.`,
     );
+
     return;
   }
 
@@ -328,11 +445,15 @@ async function handleNumberButton(
         "Sunucu sahibinin takma adı bot tarafından değiştirilemez.",
       ].join("\n"),
     );
+
     return;
   }
 
   const number = settings.nextNumber;
-  const nickname = createNickname(number, member);
+  const nickname = createNickname(
+    number,
+    member,
+  );
 
   try {
     await member.setNickname(
@@ -340,27 +461,38 @@ async function handleNumberButton(
       `Yetkili numarası verildi: ${number}`,
     );
   } catch (error) {
-    console.error("❌ Takma adı değiştirilemedi:", error);
+    console.error(
+      "❌ Takma adı değiştirilemedi:",
+      error,
+    );
 
     await interaction.editReply(
       "❌ Takma adın değiştirilemedi. Bot rolünü kullanıcının en yüksek rolünün üstüne taşı.",
     );
+
     return;
   }
 
   settings.numbers[member.id] = number;
   settings.nextNumber = number + 1;
+
   saveDatabase();
 
   await interaction.editReply(
-    `✅ Numaran **${number}** oldu.\nYeni ismin: **${member.displayName}**`,
+    `✅ Numaran **${number}** oldu.\nYeni ismin: **${nickname}**`,
   );
 }
+
+/* =========================================================
+   GÖREV AL BUTONU
+========================================================= */
 
 async function handleDutyButton(
   interaction: ButtonInteraction,
 ): Promise<void> {
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({
+    ephemeral: true,
+  });
 
   const result = await requireStaff(interaction);
 
@@ -375,26 +507,49 @@ async function handleDutyButton(
     .catch(() => null);
 
   if (!dutyRole) {
-    await interaction.editReply("❌ Görevde rolü bulunamadı. `/kurulum` komutunu tekrar kullan.");
+    await interaction.editReply(
+      "❌ Görevde rolü bulunamadı. `/yetkili-panel` komutunu tekrar kullan.",
+    );
+
     return;
   }
 
   if (!dutyRole.editable) {
-    await interaction.editReply("❌ Bot Görevde rolünü veremiyor. Bot rolünü yukarı taşı.");
+    await interaction.editReply(
+      "❌ Bot Görevde rolünü veremiyor. Bot rolünü Görevde rolünün üstüne taşı.",
+    );
+
     return;
   }
 
-  if (member.roles.cache.has(dutyRole.id)) {
-    await member.roles.remove(dutyRole, "Görev bırakıldı.");
+  if (
+    member.roles.cache.has(dutyRole.id)
+  ) {
+    await member.roles.remove(
+      dutyRole,
+      "Görev bırakıldı.",
+    );
 
-    await interaction.editReply("✅ Görevden çıktın. Görevde rolün kaldırıldı.");
+    await interaction.editReply(
+      "✅ Görevden çıktın. Görevde rolün kaldırıldı.",
+    );
+
     return;
   }
 
-  await member.roles.add(dutyRole, "Görev alındı.");
+  await member.roles.add(
+    dutyRole,
+    "Görev alındı.",
+  );
 
-  await interaction.editReply("✅ Görev aldın. Görevde rolün verildi.");
+  await interaction.editReply(
+    "✅ Görev aldın. Görevde rolün verildi.",
+  );
 }
+
+/* =========================================================
+   PANEL KOMUTU
+========================================================= */
 
 async function handlePanelCommand(
   interaction: ChatInputCommandInteraction,
@@ -402,30 +557,60 @@ async function handlePanelCommand(
   if (
     !interaction.inGuild() ||
     !interaction.guild ||
-    !interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)
+    !interaction.memberPermissions?.has(
+      PermissionFlagsBits.ManageGuild,
+    )
   ) {
     await interaction.reply({
-      content: "❌ Bu komut için Sunucuyu Yönet yetkisi gerekir.",
+      content:
+        "❌ Bu komut için Sunucuyu Yönet yetkisi gerekir.",
       ephemeral: true,
     });
+
     return;
   }
 
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({
+    ephemeral: true,
+  });
 
-  const settings = await ensureStaffSystemSetup(interaction.guild);
+  try {
+    const settings =
+      await ensureStaffSystemSetup(
+        interaction.guild,
+      );
 
-  await interaction.editReply(
-    `✅ Yetkili paneli hazırlandı: <#${settings.panelChannelId}>`,
-  );
+    await interaction.editReply(
+      `✅ Yetkili paneli hazırlandı: <#${settings.panelChannelId}>`,
+    );
+  } catch (error) {
+    console.error(
+      "❌ Yetkili sistemi kurulamadı:",
+      error,
+    );
+
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Bilinmeyen bir hata oluştu.";
+
+    await interaction.editReply(
+      `❌ Kurulum başarısız: ${message}`,
+    );
+  }
 }
+
+/* =========================================================
+   ETKİLEŞİM YÖNETİCİSİ
+========================================================= */
 
 export async function handleStaffSystemInteraction(
   interaction: Interaction,
 ): Promise<boolean> {
   if (
     interaction.isChatInputCommand() &&
-    interaction.commandName === "yetkili-panel"
+    interaction.commandName ===
+      "yetkili-panel"
   ) {
     await handlePanelCommand(interaction);
     return true;
@@ -435,14 +620,21 @@ export async function handleStaffSystemInteraction(
     return false;
   }
 
-  if (interaction.customId === NUMBER_BUTTON_ID) {
+  if (
+    interaction.customId ===
+    NUMBER_BUTTON_ID
+  ) {
     await handleNumberButton(interaction);
     return true;
   }
 
-  if (interaction.customId === DUTY_BUTTON_ID) {
+  if (
+    interaction.customId ===
+    DUTY_BUTTON_ID
+  ) {
     await handleDutyButton(interaction);
     return true;
   }
 
-  return fals
+  return false;
+}
