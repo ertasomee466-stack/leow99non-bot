@@ -3,6 +3,7 @@ import {
   ButtonBuilder,
   ButtonInteraction,
   ButtonStyle,
+  CategoryChannel,
   ChannelType,
   ChatInputCommandInteraction,
   EmbedBuilder,
@@ -12,14 +13,14 @@ import {
   PermissionFlagsBits,
   Role,
   SlashCommandBuilder,
-  TextBasedChannel,
+  TextChannel,
 } from "discord.js";
 
 import fs from "node:fs";
 import path from "node:path";
 
 /* =========================================================
-   YETKİLİ NUMARA + GÖREV SİSTEMİ
+   TÜRLER
 ========================================================= */
 
 interface GuildStaffSettings {
@@ -34,13 +35,17 @@ interface StaffDatabase {
   guilds: Record<string, GuildStaffSettings>;
 }
 
-interface StaffResult {
+interface StaffCheckResult {
   member: GuildMember;
   settings: GuildStaffSettings;
 }
 
-const DATA_DIR = path.resolve(process.cwd(), "data");
-const DATA_FILE = path.join(DATA_DIR, "staff-system.json");
+/* =========================================================
+   SABİTLER
+========================================================= */
+
+const DATA_DIRECTORY = path.join(process.cwd(), "data");
+const DATA_FILE = path.join(DATA_DIRECTORY, "staff-system.json");
 
 const STAFF_ROLE_NAME = "Yetkili";
 const DUTY_ROLE_NAME = "Görevde";
@@ -50,8 +55,6 @@ const PANEL_CHANNEL_NAME = "yetkili-panel";
 
 const NUMBER_BUTTON_ID = "staff:number";
 const DUTY_BUTTON_ID = "staff:duty";
-
-let database: StaffDatabase = loadDatabase();
 
 /* =========================================================
    VERİTABANI
@@ -65,20 +68,14 @@ function loadDatabase(): StaffDatabase {
       };
     }
 
-    const fileContent = fs.readFileSync(DATA_FILE, "utf8");
-    const parsed = JSON.parse(fileContent) as Partial<StaffDatabase>;
-
-    if (!parsed.guilds) {
-      return {
-        guilds: {},
-      };
-    }
+    const content = fs.readFileSync(DATA_FILE, "utf8");
+    const parsed = JSON.parse(content) as Partial<StaffDatabase>;
 
     return {
-      guilds: parsed.guilds,
+      guilds: parsed.guilds ?? {},
     };
   } catch (error) {
-    console.error("❌ Yetkili sistemi veritabanı okunamadı:", error);
+    console.error("Yetkili sistemi veritabanı okunamadı:", error);
 
     return {
       guilds: {},
@@ -88,7 +85,7 @@ function loadDatabase(): StaffDatabase {
 
 function saveDatabase(): void {
   try {
-    fs.mkdirSync(DATA_DIR, {
+    fs.mkdirSync(DATA_DIRECTORY, {
       recursive: true,
     });
 
@@ -98,52 +95,52 @@ function saveDatabase(): void {
       "utf8",
     );
   } catch (error) {
-    console.error("❌ Yetkili sistemi veritabanı kaydedilemedi:", error);
+    console.error("Yetkili sistemi veritabanı kaydedilemedi:", error);
   }
 }
 
+const database: StaffDatabase = loadDatabase();
+
 /* =========================================================
-   İSİM VE NUMARA İŞLEMLERİ
+   YARDIMCI FONKSİYONLAR
 ========================================================= */
 
-function cleanName(name: string): string {
-  return name.replace(/^\[\d+\]\s*-\s*/u, "").trim() || "Yetkili";
+function cleanNickname(name: string): string {
+  const cleaned = name
+    .replace(/^\[\d+\]\s*-\s*/u, "")
+    .trim();
+
+  return cleaned || "Yetkili";
 }
 
 function createNickname(
   number: number,
   member: GuildMember,
 ): string {
-  const originalName =
+  const currentName =
     member.nickname ??
     member.user.globalName ??
     member.user.username;
 
-  const baseName = cleanName(originalName);
   const prefix = `[${number}] - `;
+  const cleanName = cleanNickname(currentName);
 
-  const maximumNameLength = Math.max(
-    1,
-    32 - prefix.length,
-  );
+  // Discord takma adı en fazla 32 karakter olabilir.
+  const availableLength = Math.max(1, 32 - prefix.length);
 
-  return `${prefix}${baseName.slice(0, maximumNameLength)}`;
+  return `${prefix}${cleanName.slice(0, availableLength)}`;
 }
-
-/* =========================================================
-   ROL VE KANAL İŞLEMLERİ
-========================================================= */
 
 async function findOrCreateRole(
   guild: Guild,
-  name: string,
+  roleName: string,
 ): Promise<Role> {
   await guild.roles.fetch();
 
   const existingRole = guild.roles.cache.find(
     (role) =>
       role.name.toLocaleLowerCase("tr-TR") ===
-      name.toLocaleLowerCase("tr-TR"),
+      roleName.toLocaleLowerCase("tr-TR"),
   );
 
   if (existingRole) {
@@ -151,50 +148,112 @@ async function findOrCreateRole(
   }
 
   return guild.roles.create({
-    name,
+    name: roleName,
     reason: "Yetkili sistemi kurulumu",
   });
 }
 
-async function getTextChannel(
+async function findOrCreateCategory(
   guild: Guild,
-  channelId: string,
-): Promise<TextBasedChannel | null> {
-  const channel = await guild.channels
-    .fetch(channelId)
-    .catch(() => null);
+  staffRole: Role,
+): Promise<CategoryChannel> {
+  await guild.channels.fetch();
 
-  if (!channel || !channel.isTextBased()) {
-    return null;
+  const existingCategory = guild.channels.cache.find(
+    (channel): channel is CategoryChannel =>
+      channel.type === ChannelType.GuildCategory &&
+      channel.name === CATEGORY_NAME,
+  );
+
+  if (existingCategory) {
+    return existingCategory;
   }
 
-  return channel;
+  return guild.channels.create({
+    name: CATEGORY_NAME,
+    type: ChannelType.GuildCategory,
+    permissionOverwrites: [
+      {
+        id: guild.roles.everyone.id,
+        deny: [PermissionFlagsBits.ViewChannel],
+      },
+      {
+        id: staffRole.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.ReadMessageHistory,
+        ],
+      },
+    ],
+    reason: "Yetkili sistemi kurulumu",
+  });
+}
+
+async function findOrCreatePanelChannel(
+  guild: Guild,
+  staffRole: Role,
+  category: CategoryChannel,
+): Promise<TextChannel> {
+  await guild.channels.fetch();
+
+  const existingChannel = guild.channels.cache.find(
+    (channel): channel is TextChannel =>
+      channel.type === ChannelType.GuildText &&
+      channel.name === PANEL_CHANNEL_NAME,
+  );
+
+  if (existingChannel) {
+    return existingChannel;
+  }
+
+  return guild.channels.create({
+    name: PANEL_CHANNEL_NAME,
+    type: ChannelType.GuildText,
+    parent: category.id,
+    topic: "Yetkili numarası ve görev alma paneli",
+    permissionOverwrites: [
+      {
+        id: guild.roles.everyone.id,
+        deny: [PermissionFlagsBits.ViewChannel],
+      },
+      {
+        id: staffRole.id,
+        allow: [
+          PermissionFlagsBits.ViewChannel,
+          PermissionFlagsBits.ReadMessageHistory,
+        ],
+        deny: [PermissionFlagsBits.SendMessages],
+      },
+    ],
+    reason: "Yetkili sistemi kurulumu",
+  });
 }
 
 /* =========================================================
    PANEL
 ========================================================= */
 
-function createPanel() {
+function createPanelMessage() {
   const embed = new EmbedBuilder()
     .setColor(0x5865f2)
     .setTitle("Yetkili İşlem Paneli")
     .setDescription(
       [
-        "Aşağıdaki butonlardan işlem yapabilirsin.",
+        "Aşağıdaki butonları kullanarak işlem yapabilirsin.",
         "",
         "🔢 **Numaramı Al**",
-        "Sana sıradaki numarayı verir ve ismini düzenler.",
+        "Sana sıradaki yetkili numarasını verir ve ismini düzenler.",
         "",
-        "📋 **Görev Al**",
-        "Görevde rolünü verir. Tekrar basarsan rol kaldırılır.",
+        "📋 **Görev Al / Bırak**",
+        "Görevde rolünü verir. Tekrar bastığında rolünü kaldırır.",
       ].join("\n"),
     )
     .setFooter({
-      text: "Her kullanıcı yalnızca bir numara alabilir.",
-    });
+      text: "Her yetkili yalnızca bir numara alabilir.",
+    })
+    .setTimestamp();
 
-  const row =
+  const buttons =
     new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
         .setCustomId(NUMBER_BUTTON_ID)
@@ -204,14 +263,14 @@ function createPanel() {
 
       new ButtonBuilder()
         .setCustomId(DUTY_BUTTON_ID)
-        .setLabel("Görev Al")
+        .setLabel("Görev Al / Bırak")
         .setEmoji("📋")
         .setStyle(ButtonStyle.Primary),
     );
 
   return {
     embeds: [embed],
-    components: [row],
+    components: [buttons],
   };
 }
 
@@ -222,22 +281,32 @@ function createPanel() {
 export async function ensureStaffSystemSetup(
   guild: Guild,
 ): Promise<GuildStaffSettings> {
-  const botMember = guild.members.me;
+  const botMember =
+    guild.members.me ??
+    (await guild.members.fetchMe().catch(() => null));
 
-  if (
-    !botMember?.permissions.has(
-      PermissionFlagsBits.ManageRoles,
-    )
-  ) {
-    throw new Error("Botta Rolleri Yönet yetkisi yok.");
+  if (!botMember) {
+    throw new Error("Botun sunucu üyelik bilgisi alınamadı.");
   }
 
   if (
-    !botMember.permissions.has(
-      PermissionFlagsBits.ManageChannels,
-    )
+    !botMember.permissions.has(PermissionFlagsBits.ManageRoles)
   ) {
-    throw new Error("Botta Kanalları Yönet yetkisi yok.");
+    throw new Error("Botta Rolleri Yönet yetkisi bulunmuyor.");
+  }
+
+  if (
+    !botMember.permissions.has(PermissionFlagsBits.ManageChannels)
+  ) {
+    throw new Error("Botta Kanalları Yönet yetkisi bulunmuyor.");
+  }
+
+  if (
+    !botMember.permissions.has(PermissionFlagsBits.ManageNicknames)
+  ) {
+    throw new Error(
+      "Botta Takma Adları Yönet yetkisi bulunmuyor.",
+    );
   }
 
   const staffRole = await findOrCreateRole(
@@ -250,64 +319,16 @@ export async function ensureStaffSystemSetup(
     DUTY_ROLE_NAME,
   );
 
-  await guild.channels.fetch();
-
-  let category = guild.channels.cache.find(
-    (channel) =>
-      channel.type === ChannelType.GuildCategory &&
-      channel.name === CATEGORY_NAME,
+  const category = await findOrCreateCategory(
+    guild,
+    staffRole,
   );
 
-  if (!category) {
-    category = await guild.channels.create({
-      name: CATEGORY_NAME,
-      type: ChannelType.GuildCategory,
-      permissionOverwrites: [
-        {
-          id: guild.roles.everyone.id,
-          deny: [PermissionFlagsBits.ViewChannel],
-        },
-        {
-          id: staffRole.id,
-          allow: [
-            PermissionFlagsBits.ViewChannel,
-            PermissionFlagsBits.ReadMessageHistory,
-          ],
-        },
-      ],
-      reason: "Yetkili sistemi kurulumu",
-    });
-  }
-
-  let panelChannel = guild.channels.cache.find(
-    (channel) =>
-      channel.type === ChannelType.GuildText &&
-      channel.name === PANEL_CHANNEL_NAME,
+  const panelChannel = await findOrCreatePanelChannel(
+    guild,
+    staffRole,
+    category,
   );
-
-  if (!panelChannel) {
-    panelChannel = await guild.channels.create({
-      name: PANEL_CHANNEL_NAME,
-      type: ChannelType.GuildText,
-      parent: category.id,
-      topic: "Yetkili numarası ve görev alma paneli",
-      permissionOverwrites: [
-        {
-          id: guild.roles.everyone.id,
-          deny: [PermissionFlagsBits.ViewChannel],
-        },
-        {
-          id: staffRole.id,
-          allow: [
-            PermissionFlagsBits.ViewChannel,
-            PermissionFlagsBits.ReadMessageHistory,
-          ],
-          deny: [PermissionFlagsBits.SendMessages],
-        },
-      ],
-      reason: "Yetkili sistemi kurulumu",
-    });
-  }
 
   const previousSettings = database.guilds[guild.id];
 
@@ -322,32 +343,20 @@ export async function ensureStaffSystemSetup(
   database.guilds[guild.id] = settings;
   saveDatabase();
 
-  const channel = await getTextChannel(
-    guild,
-    panelChannel.id,
-  );
-
-  if (!channel) {
-    throw new Error(
-      "Yetkili panel kanalı kullanılamıyor.",
-    );
-  }
-
-  await channel.send(createPanel());
+  // TextChannel olduğu kesin olduğu için send hatası oluşmaz.
+  await panelChannel.send(createPanelMessage());
 
   return settings;
 }
 
 /* =========================================================
-   SLASH KOMUTU
+   SLASH KOMUTLARI
 ========================================================= */
 
 export const staffSystemCommands = [
   new SlashCommandBuilder()
     .setName("yetkili-panel")
-    .setDescription(
-      "Yetkili panelini kurar veya tekrar gönderir.",
-    )
+    .setDescription("Yetkili sistemini kurar ve paneli gönderir.")
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageGuild,
     ),
@@ -359,43 +368,42 @@ export const staffSystemCommands = [
 
 async function requireStaff(
   interaction: ButtonInteraction,
-): Promise<StaffResult | null> {
-  if (!interaction.guild || !interaction.guildId) {
+): Promise<StaffCheckResult | null> {
+  const guild = interaction.guild;
+
+  if (!guild || !interaction.guildId) {
     await interaction.editReply(
-      "❌ Sunucu bilgisi alınamadı.",
+      "❌ Bu işlem yalnızca bir sunucuda kullanılabilir.",
     );
 
     return null;
   }
 
-  const settings =
-    database.guilds[interaction.guildId];
+  const settings = database.guilds[interaction.guildId];
 
   if (!settings) {
     await interaction.editReply(
-      "❌ Sistem kurulu değil. Yönetici `/yetkili-panel` komutunu kullanmalı.",
+      "❌ Yetkili sistemi kurulu değil. Bir yönetici `/yetkili-panel` komutunu kullanmalı.",
     );
 
     return null;
   }
 
-  const member = await interaction.guild.members
+  const member = await guild.members
     .fetch(interaction.user.id)
     .catch(() => null);
 
   if (!member) {
     await interaction.editReply(
-      "❌ Üyelik bilgin alınamadı.",
+      "❌ Sunucudaki üyelik bilgin alınamadı.",
     );
 
     return null;
   }
 
-  if (
-    !member.roles.cache.has(settings.staffRoleId)
-  ) {
+  if (!member.roles.cache.has(settings.staffRoleId)) {
     await interaction.editReply(
-      "❌ Yetkili rolüne sahip değilsin.",
+      "❌ Bu butonu kullanmak için Yetkili rolüne sahip olmalısın.",
     );
 
     return null;
@@ -426,8 +434,7 @@ async function handleNumberButton(
 
   const { member, settings } = result;
 
-  const existingNumber =
-    settings.numbers[member.id];
+  const existingNumber = settings.numbers[member.id];
 
   if (existingNumber !== undefined) {
     await interaction.editReply(
@@ -440,8 +447,9 @@ async function handleNumberButton(
   if (!member.manageable) {
     await interaction.editReply(
       [
-        "❌ Bot takma adını değiştiremiyor.",
-        "Bot rolünü Yetkili rolünün üstüne taşı.",
+        "❌ Bot senin takma adını değiştiremiyor.",
+        "",
+        "Botun rolünü Yetkili rolünün ve senin en yüksek rolünün üzerine taşı.",
         "Sunucu sahibinin takma adı bot tarafından değiştirilemez.",
       ].join("\n"),
     );
@@ -450,10 +458,7 @@ async function handleNumberButton(
   }
 
   const number = settings.nextNumber;
-  const nickname = createNickname(
-    number,
-    member,
-  );
+  const nickname = createNickname(number, member);
 
   try {
     await member.setNickname(
@@ -461,30 +466,31 @@ async function handleNumberButton(
       `Yetkili numarası verildi: ${number}`,
     );
   } catch (error) {
-    console.error(
-      "❌ Takma adı değiştirilemedi:",
-      error,
-    );
+    console.error("Yetkili takma adı değiştirilemedi:", error);
 
     await interaction.editReply(
-      "❌ Takma adın değiştirilemedi. Bot rolünü kullanıcının en yüksek rolünün üstüne taşı.",
+      "❌ Takma adın değiştirilemedi. Bot rolünün yeterince yukarıda olduğundan emin ol.",
     );
 
     return;
   }
 
   settings.numbers[member.id] = number;
-  settings.nextNumber = number + 1;
+  settings.nextNumber += 1;
 
   saveDatabase();
 
   await interaction.editReply(
-    `✅ Numaran **${number}** oldu.\nYeni ismin: **${nickname}**`,
+    [
+      "✅ Yetkili numaran başarıyla verildi.",
+      `🔢 Numaran: **${number}**`,
+      `👤 Yeni ismin: **${nickname}**`,
+    ].join("\n"),
   );
 }
 
 /* =========================================================
-   GÖREV AL BUTONU
+   GÖREV AL / BIRAK BUTONU
 ========================================================= */
 
 async function handleDutyButton(
@@ -516,35 +522,41 @@ async function handleDutyButton(
 
   if (!dutyRole.editable) {
     await interaction.editReply(
-      "❌ Bot Görevde rolünü veremiyor. Bot rolünü Görevde rolünün üstüne taşı.",
+      "❌ Bot Görevde rolünü yönetemiyor. Bot rolünü Görevde rolünün üzerine taşı.",
     );
 
     return;
   }
 
-  if (
-    member.roles.cache.has(dutyRole.id)
-  ) {
-    await member.roles.remove(
+  try {
+    if (member.roles.cache.has(dutyRole.id)) {
+      await member.roles.remove(
+        dutyRole,
+        "Yetkili görevden çıktı.",
+      );
+
+      await interaction.editReply(
+        "✅ Görevden çıktın. Görevde rolün kaldırıldı.",
+      );
+
+      return;
+    }
+
+    await member.roles.add(
       dutyRole,
-      "Görev bırakıldı.",
+      "Yetkili göreve başladı.",
     );
 
     await interaction.editReply(
-      "✅ Görevden çıktın. Görevde rolün kaldırıldı.",
+      "✅ Göreve başladın. Görevde rolün verildi.",
     );
+  } catch (error) {
+    console.error("Görev rolü işlemi başarısız:", error);
 
-    return;
+    await interaction.editReply(
+      "❌ Görev rolü işlemi yapılamadı. Botun rol ve yetkilerini kontrol et.",
+    );
   }
-
-  await member.roles.add(
-    dutyRole,
-    "Görev alındı.",
-  );
-
-  await interaction.editReply(
-    "✅ Görev aldın. Görevde rolün verildi.",
-  );
 }
 
 /* =========================================================
@@ -563,7 +575,7 @@ async function handlePanelCommand(
   ) {
     await interaction.reply({
       content:
-        "❌ Bu komut için Sunucuyu Yönet yetkisi gerekir.",
+        "❌ Bu komutu kullanmak için Sunucuyu Yönet yetkisine sahip olmalısın.",
       ephemeral: true,
     });
 
@@ -575,27 +587,23 @@ async function handlePanelCommand(
   });
 
   try {
-    const settings =
-      await ensureStaffSystemSetup(
-        interaction.guild,
-      );
+    const settings = await ensureStaffSystemSetup(
+      interaction.guild,
+    );
 
     await interaction.editReply(
-      `✅ Yetkili paneli hazırlandı: <#${settings.panelChannelId}>`,
+      `✅ Yetkili sistemi hazırlandı.\n📍 Panel: <#${settings.panelChannelId}>`,
     );
   } catch (error) {
-    console.error(
-      "❌ Yetkili sistemi kurulamadı:",
-      error,
-    );
+    console.error("Yetkili sistemi kurulamadı:", error);
 
-    const message =
+    const errorMessage =
       error instanceof Error
         ? error.message
         : "Bilinmeyen bir hata oluştu.";
 
     await interaction.editReply(
-      `❌ Kurulum başarısız: ${message}`,
+      `❌ Kurulum başarısız oldu: ${errorMessage}`,
     );
   }
 }
@@ -609,8 +617,7 @@ export async function handleStaffSystemInteraction(
 ): Promise<boolean> {
   if (
     interaction.isChatInputCommand() &&
-    interaction.commandName ===
-      "yetkili-panel"
+    interaction.commandName === "yetkili-panel"
   ) {
     await handlePanelCommand(interaction);
     return true;
@@ -620,18 +627,12 @@ export async function handleStaffSystemInteraction(
     return false;
   }
 
-  if (
-    interaction.customId ===
-    NUMBER_BUTTON_ID
-  ) {
+  if (interaction.customId === NUMBER_BUTTON_ID) {
     await handleNumberButton(interaction);
     return true;
   }
 
-  if (
-    interaction.customId ===
-    DUTY_BUTTON_ID
-  ) {
+  if (interaction.customId === DUTY_BUTTON_ID) {
     await handleDutyButton(interaction);
     return true;
   }
