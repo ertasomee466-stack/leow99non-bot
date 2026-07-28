@@ -24,6 +24,66 @@ const TEMP_CATEGORY_NAME = "ÖZEL ODALAR";
 const CREATE_ROOM_CHANNEL_NAME = "➕・oda-oluştur";
 const ACCEPT_RULES_BUTTON_ID = "accept_server_rules";
 
+const ROLE_SELECT_BUTTON_PREFIX = "role-select:";
+
+interface RoleSelectionOption {
+  roleName: string;
+  label: string;
+  emoji: string;
+}
+
+interface RoleSelectionPanel {
+  channelName: string;
+  options: RoleSelectionOption[];
+}
+
+const ROLE_SELECTION_PANELS: RoleSelectionPanel[] = [
+  {
+    channelName: "ilişki-seçim",
+    options: [
+      { roleName: "Sevgili Yapmıyorum", label: "Sevgili Yapmıyorum", emoji: "💔" },
+      { roleName: "Sevgilim Var", label: "Sevgilim Var", emoji: "❤️" },
+      { roleName: "Sapım", label: "Sapım", emoji: "💔" },
+    ],
+  },
+  {
+    channelName: "burç-seçim",
+    options: [
+      { roleName: "Koç", label: "Koç", emoji: "♈" },
+      { roleName: "Boğa", label: "Boğa", emoji: "♉" },
+      { roleName: "İkizler", label: "İkizler", emoji: "♊" },
+      { roleName: "Yengeç", label: "Yengeç", emoji: "♋" },
+      { roleName: "Aslan", label: "Aslan", emoji: "♌" },
+      { roleName: "Başak", label: "Başak", emoji: "♍" },
+      { roleName: "Terazi", label: "Terazi", emoji: "♎" },
+      { roleName: "Akrep", label: "Akrep", emoji: "♏" },
+      { roleName: "Yay", label: "Yay", emoji: "♐" },
+      { roleName: "Oğlak", label: "Oğlak", emoji: "♑" },
+      { roleName: "Kova", label: "Kova", emoji: "♒" },
+      { roleName: "Balık", label: "Balık", emoji: "♓" },
+    ],
+  },
+  {
+    channelName: "renk-seçim",
+    options: [
+      { roleName: "pink", label: "pink", emoji: "🩷" },
+      { roleName: "white", label: "white", emoji: "🤍" },
+      { roleName: "purple", label: "purple", emoji: "💜" },
+      { roleName: "green", label: "green", emoji: "💚" },
+      { roleName: "blue", label: "blue", emoji: "🩵" },
+      { roleName: "yellow", label: "yellow", emoji: "💛" },
+      { roleName: "black", label: "black", emoji: "🖤" },
+      { roleName: "red", label: "red", emoji: "❤️" },
+    ],
+  },
+];
+
+const ALL_SELECTION_ROLE_NAMES = new Set(
+  ROLE_SELECTION_PANELS.flatMap((panel) =>
+    panel.options.map((option) => option.roleName.toLocaleLowerCase("tr-TR")),
+  ),
+);
+
 const initializedClients = new WeakSet<Client>();
 const setupLocks = new Set<string>();
 const temporaryVoiceChannels = new Set<string>();
@@ -272,6 +332,179 @@ async function repairRegisteredMemberRoles(
   return repairedCount;
 }
 
+
+function findRoleByName(guild: Guild, roleName: string) {
+  return guild.roles.cache.find(
+    (role) =>
+      role.name.toLocaleLowerCase("tr-TR") ===
+      roleName.toLocaleLowerCase("tr-TR"),
+  );
+}
+
+function findTextChannelByName(
+  guild: Guild,
+  channelName: string,
+): TextChannel | undefined {
+  return guild.channels.cache.find(
+    (channel): channel is TextChannel =>
+      channel.type === ChannelType.GuildText &&
+      (
+        channel.name === channelName ||
+        normalizeChannelName(channel.name) === normalizeChannelName(channelName)
+      ),
+  );
+}
+
+function roleButtonCustomId(roleId: string): string {
+  return `${ROLE_SELECT_BUTTON_PREFIX}${roleId}`;
+}
+
+async function ensureRoleSelectionPanels(guild: Guild): Promise<void> {
+  await guild.roles.fetch();
+  await guild.channels.fetch();
+
+  for (const panel of ROLE_SELECTION_PANELS) {
+    const channel = findTextChannelByName(guild, panel.channelName);
+
+    if (!channel) {
+      console.warn(
+        `⚠️ Rol seçim kanalı bulunamadı: #${panel.channelName}`,
+      );
+      continue;
+    }
+
+    const recentMessages = await channel.messages
+      .fetch({ limit: 100 })
+      .catch(() => null);
+
+    for (const option of panel.options) {
+      const role = findRoleByName(guild, option.roleName);
+
+      if (!role) {
+        console.warn(
+          `⚠️ Rol seçim rolü bulunamadı: ${option.roleName}`,
+        );
+        continue;
+      }
+
+      const customId = roleButtonCustomId(role.id);
+      const alreadyExists = recentMessages?.some((message) => {
+        if (message.author.id !== guild.members.me?.id) {
+          return false;
+        }
+
+        const serialized = JSON.stringify(
+          message.components.map((component) => component.toJSON()),
+        );
+
+        return serialized.includes(customId);
+      }) ?? false;
+
+      if (alreadyExists) {
+        continue;
+      }
+
+      const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+        new ButtonBuilder()
+          .setCustomId(customId)
+          .setLabel(option.label)
+          .setEmoji(option.emoji)
+          .setStyle(ButtonStyle.Secondary),
+      );
+
+      await channel.send({
+        content: "Almak istediğin rolün butonuna tıkla.",
+        components: [row],
+      });
+    }
+  }
+}
+
+async function handleRoleSelection(
+  interaction: import("discord.js").ButtonInteraction,
+): Promise<void> {
+  if (!interaction.inGuild() || !interaction.guild) {
+    await interaction.reply({
+      content: "❌ Bu buton yalnızca sunucuda kullanılabilir.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const roleId = interaction.customId.slice(
+    ROLE_SELECT_BUTTON_PREFIX.length,
+  );
+
+  const role = await interaction.guild.roles
+    .fetch(roleId)
+    .catch(() => null);
+
+  if (!role) {
+    await interaction.reply({
+      content: "❌ Bu rol artık bulunmuyor.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const configuredRole = ALL_SELECTION_ROLE_NAMES.has(
+    role.name.toLocaleLowerCase("tr-TR"),
+  );
+
+  if (!configuredRole) {
+    await interaction.reply({
+      content: "❌ Bu buton geçerli bir seçim rolüne bağlı değil.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const member = await interaction.guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
+
+  if (!member) {
+    await interaction.reply({
+      content: "❌ Üyelik bilgin alınamadı.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  if (!role.editable) {
+    await interaction.reply({
+      content:
+        "❌ Bot bu rolü yönetemiyor. Bot rolünü seçim rollerinin üzerine taşı.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  if (member.roles.cache.has(role.id)) {
+    await member.roles.remove(role, "Kullanıcı seçim rolünü bıraktı.");
+    await interaction.editReply(`✅ **${role.name}** rolü kaldırıldı.`);
+    return;
+  }
+
+  const selectedRoles = member.roles.cache.filter((memberRole) =>
+    ALL_SELECTION_ROLE_NAMES.has(
+      memberRole.name.toLocaleLowerCase("tr-TR"),
+    ),
+  );
+
+  if (selectedRoles.size >= 2) {
+    await interaction.editReply(
+      "❌ En fazla **2 seçim rolü** alabilirsin. Önce rollerinden birini bırak.",
+    );
+    return;
+  }
+
+  await member.roles.add(role, "Kullanıcı seçim rolünü aldı.");
+  await interaction.editReply(`✅ **${role.name}** rolü verildi.`);
+}
+
 export async function ensureCommunitySetup(guild: Guild): Promise<void> {
   if (setupLocks.has(guild.id)) return;
   setupLocks.add(guild.id);
@@ -320,6 +553,7 @@ export async function ensureCommunitySetup(guild: Guild): Promise<void> {
     );
 
     await ensureRulesMessage(guild, registerChannel);
+    await ensureRoleSelectionPanels(guild);
 
     const repairedCount = await repairRegisteredMemberRoles(
       guild,
@@ -585,20 +819,36 @@ export function initializeCommunityFeatures(client: Client): void {
   });
 
   client.on(Events.InteractionCreate, (interaction) => {
-    if (!interaction.isButton() || interaction.customId !== ACCEPT_RULES_BUTTON_ID) {
+    if (!interaction.isButton()) {
       return;
     }
 
-    void handleAcceptRules(interaction).catch(async (error: unknown) => {
-      console.error("❌ Kayıt butonu hatası:", error);
-      if (!interaction.isRepliable()) return;
-      const content = "❌ Kayıt sırasında beklenmeyen bir hata oluştu.";
-      if (interaction.replied || interaction.deferred) {
-        await interaction.followUp({ content, ephemeral: true }).catch(() => null);
-      } else {
-        await interaction.reply({ content, ephemeral: true }).catch(() => null);
-      }
-    });
+    if (interaction.customId === ACCEPT_RULES_BUTTON_ID) {
+      void handleAcceptRules(interaction).catch(async (error: unknown) => {
+        console.error("❌ Kayıt butonu hatası:", error);
+        if (!interaction.isRepliable()) return;
+        const content = "❌ Kayıt sırasında beklenmeyen bir hata oluştu.";
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp({ content, ephemeral: true }).catch(() => null);
+        } else {
+          await interaction.reply({ content, ephemeral: true }).catch(() => null);
+        }
+      });
+      return;
+    }
+
+    if (interaction.customId.startsWith(ROLE_SELECT_BUTTON_PREFIX)) {
+      void handleRoleSelection(interaction).catch(async (error: unknown) => {
+        console.error("❌ Rol seçim butonu hatası:", error);
+        if (!interaction.isRepliable()) return;
+        const content = "❌ Rol işlemi sırasında beklenmeyen bir hata oluştu.";
+        if (interaction.replied || interaction.deferred) {
+          await interaction.followUp({ content, ephemeral: true }).catch(() => null);
+        } else {
+          await interaction.reply({ content, ephemeral: true }).catch(() => null);
+        }
+      });
+    }
   });
 
   client.on(Events.VoiceStateUpdate, (oldState, newState) => {
