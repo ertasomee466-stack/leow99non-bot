@@ -34,6 +34,7 @@ interface RoleSelectionItem {
   roleName: string;
   buttonLabel: string;
   emoji: string;
+  aliases?: string[];
 }
 
 interface RoleSelectionGroup {
@@ -48,19 +49,22 @@ const ROLE_SELECTION_GROUPS: RoleSelectionGroup[] = [
     channelName: "ilişki-seçim",
     items: [
       {
-        roleName: "Sevgili yapmıyorum🖤",
+        roleName: "Sevgili yapmıyorum 🖤",
         buttonLabel: "Sevgili yapmıyorum",
         emoji: "🖤",
+        aliases: ["Sevgili yapmıyorum🖤", "Sevgili Yapmıyorum 🖤"],
       },
       {
-        roleName: "Sevgili Yapıyorum🤍",
+        roleName: "Sevgili Yapıyorum 🤍",
         buttonLabel: "Sevgili Yapıyorum",
         emoji: "🤍",
+        aliases: ["Sevgili Yapıyorum🤍", "Sevgili yapıyorum 🤍"],
       },
       {
-        roleName: "Sapığım💔",
+        roleName: "Sapığım 💔",
         buttonLabel: "Sapığım",
         emoji: "💔",
+        aliases: ["Sapığım💔", "Sapigim 💔"],
       },
     ],
   },
@@ -68,32 +72,32 @@ const ROLE_SELECTION_GROUPS: RoleSelectionGroup[] = [
     key: "burc",
     channelName: "burç-seçim",
     items: [
-      { roleName: "♈ Koç", buttonLabel: "Koç", emoji: "♈" },
-      { roleName: "♉ Boğa", buttonLabel: "Boğa", emoji: "♉" },
-      { roleName: "♊ İkizler", buttonLabel: "İkizler", emoji: "♊" },
-      { roleName: "♋ Yengeç", buttonLabel: "Yengeç", emoji: "♋" },
-      { roleName: "♌ Aslan", buttonLabel: "Aslan", emoji: "♌" },
-      { roleName: "♍ Başak", buttonLabel: "Başak", emoji: "♍" },
-      { roleName: "♎ Terazi", buttonLabel: "Terazi", emoji: "♎" },
-      { roleName: "♏ Akrep", buttonLabel: "Akrep", emoji: "♏" },
-      { roleName: "♐ Yay", buttonLabel: "Yay", emoji: "♐" },
-      { roleName: "♑ Oğlak", buttonLabel: "Oğlak", emoji: "♑" },
-      { roleName: "♒ Kova", buttonLabel: "Kova", emoji: "♒" },
-      { roleName: "♓ Balık", buttonLabel: "Balık", emoji: "♓" },
+      { roleName: "♈ Koç", buttonLabel: "Koç", emoji: "♈", aliases: ["Koç"] },
+      { roleName: "♉ Boğa", buttonLabel: "Boğa", emoji: "♉", aliases: ["Boğa"] },
+      { roleName: "♊ İkizler", buttonLabel: "İkizler", emoji: "♊", aliases: ["İkizler"] },
+      { roleName: "♋ Yengeç", buttonLabel: "Yengeç", emoji: "♋", aliases: ["Yengeç"] },
+      { roleName: "♌ Aslan", buttonLabel: "Aslan", emoji: "♌", aliases: ["Aslan"] },
+      { roleName: "♍ Başak", buttonLabel: "Başak", emoji: "♍", aliases: ["Başak"] },
+      { roleName: "♎ Terazi", buttonLabel: "Terazi", emoji: "♎", aliases: ["Terazi"] },
+      { roleName: "♏ Akrep", buttonLabel: "Akrep", emoji: "♏", aliases: ["Akrep"] },
+      { roleName: "♐ Yay", buttonLabel: "Yay", emoji: "♐", aliases: ["Yay"] },
+      { roleName: "♑ Oğlak", buttonLabel: "Oğlak", emoji: "♑", aliases: ["Oğlak"] },
+      { roleName: "♒ Kova", buttonLabel: "Kova", emoji: "♒", aliases: ["Kova"] },
+      { roleName: "♓ Balık", buttonLabel: "Balık", emoji: "♓", aliases: ["Balık"] },
     ],
   },
   {
     key: "renk",
     channelName: "renk-seçim",
     items: [
-      { roleName: "🤍 White", buttonLabel: "White", emoji: "🤍" },
-      { roleName: "🖤 Black", buttonLabel: "Black", emoji: "🖤" },
-      { roleName: "💜 Purple", buttonLabel: "Purple", emoji: "💜" },
-      { roleName: "🩷 Pink", buttonLabel: "Pink", emoji: "🩷" },
-      { roleName: "❤️ Red", buttonLabel: "Red", emoji: "❤️" },
-      { roleName: "💙 Blue", buttonLabel: "Blue", emoji: "💙" },
-      { roleName: "💚 Green", buttonLabel: "Green", emoji: "💚" },
-      { roleName: "💛 Gold", buttonLabel: "Gold", emoji: "💛" },
+      { roleName: "🤍 White", buttonLabel: "White", emoji: "🤍", aliases: ["White"] },
+      { roleName: "🖤 Black", buttonLabel: "Black", emoji: "🖤", aliases: ["Black"] },
+      { roleName: "💜 Purple", buttonLabel: "Purple", emoji: "💜", aliases: ["Purple"] },
+      { roleName: "🩷 Pink", buttonLabel: "Pink", emoji: "🩷", aliases: ["Pink"] },
+      { roleName: "❤️ Red", buttonLabel: "Red", emoji: "❤️", aliases: ["Red"] },
+      { roleName: "💙 Blue", buttonLabel: "Blue", emoji: "💙", aliases: ["Blue"] },
+      { roleName: "💚 Green", buttonLabel: "Green", emoji: "💚", aliases: ["Green"] },
+      { roleName: "💛 Gold", buttonLabel: "Gold", emoji: "💛", aliases: ["Gold", "Yellow", "💛 Yellow"] },
     ],
   },
 ];
@@ -349,31 +353,57 @@ async function repairRegisteredMemberRoles(
 
 function normalizeRoleLookupName(name: string): string {
   return name
+    .normalize("NFKD")
     .toLocaleLowerCase("tr-TR")
-    .replace(/[\p{Emoji_Presentation}\p{Extended_Pictographic}\uFE0F]/gu, "")
-    .replace(/\s+/g, "")
+    .replaceAll("ç", "c")
+    .replaceAll("ğ", "g")
+    .replaceAll("ı", "i")
+    .replaceAll("ö", "o")
+    .replaceAll("ş", "s")
+    .replaceAll("ü", "u")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/g, "")
     .trim();
 }
 
 function findExistingRole(
   guild: Guild,
-  configuredRoleName: string,
+  item: RoleSelectionItem,
 ): import("discord.js").Role | undefined {
-  const exactRole = guild.roles.cache.find(
-    (role) => role.name === configuredRoleName,
-  );
+  const candidates = [
+    item.roleName,
+    item.buttonLabel,
+    ...(item.aliases ?? []),
+  ];
 
-  if (exactRole) {
-    return exactRole;
+  for (const candidate of candidates) {
+    const exactRole = guild.roles.cache.find(
+      (role) => role.name === candidate,
+    );
+
+    if (exactRole) {
+      return exactRole;
+    }
   }
 
-  const normalizedConfiguredName =
-    normalizeRoleLookupName(configuredRoleName);
-
-  return guild.roles.cache.find(
-    (role) =>
-      normalizeRoleLookupName(role.name) === normalizedConfiguredName,
+  const normalizedCandidates = new Set(
+    candidates.map(normalizeRoleLookupName).filter(Boolean),
   );
+
+  const normalizedMatches = guild.roles.cache.filter((role) =>
+    normalizedCandidates.has(normalizeRoleLookupName(role.name)),
+  );
+
+  if (normalizedMatches.size === 1) {
+    return normalizedMatches.first();
+  }
+
+  const labelKey = normalizeRoleLookupName(item.buttonLabel);
+
+  return guild.roles.cache.find((role) => {
+    const roleKey = normalizeRoleLookupName(role.name);
+    return roleKey === labelKey || roleKey.endsWith(labelKey);
+  });
 }
 
 async function getOrCreateRoleSelectionChannel(
@@ -499,11 +529,11 @@ async function ensureRoleSelectionPanels(
         continue;
       }
 
-      const role = findExistingRole(guild, item.roleName);
+      const role = findExistingRole(guild, item);
 
       if (!role) {
         console.warn(
-          `⚠️ Rol seçim rolü bulunamadı: ${item.roleName}`,
+          `⚠️ Rol seçim rolü bulunamadı: ${item.roleName} | Aranan etiket: ${item.buttonLabel}`,
         );
         continue;
       }
@@ -573,7 +603,7 @@ async function handleRoleSelection(
 
   const selectedRole = findExistingRole(
     interaction.guild,
-    item.roleName,
+    item,
   );
 
   if (!selectedRole) {
@@ -606,7 +636,7 @@ async function handleRoleSelection(
     .map((groupItem) =>
       findExistingRole(
         interaction.guild!,
-        groupItem.roleName,
+        groupItem,
       )?.id,
     )
     .filter((roleId): roleId is string => Boolean(roleId));
