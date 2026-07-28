@@ -538,18 +538,6 @@ async function handleEnterDuty(
     return;
   }
 
-  if (!member.manageable) {
-    await interaction.editReply(
-      [
-        "❌ Bot senin takma adını değiştiremiyor.",
-        "",
-        "Botun rolünü Yetkili rolünün ve senin en yüksek rolünün üzerine taşı.",
-        "Sunucu sahibinin takma adı bot tarafından değiştirilemez.",
-      ].join("\n"),
-    );
-    return;
-  }
-
   if (member.roles.cache.has(dutyRole.id)) {
     const currentNumber = settings.activeNumbers[member.id];
 
@@ -569,23 +557,26 @@ async function handleEnterDuty(
       dutyRole,
       `Yetkili mesaiye girdi. Numara: ${number}`,
     );
-
-    await member.setNickname(
-      nickname,
-      `Yetkili mesaiye girdi. Numara: ${number}`,
-    );
   } catch (error) {
-    console.error("Mesaiye giriş işlemi başarısız:", error);
-
-    await member.roles.remove(
-      dutyRole,
-      "Mesaiye giriş işlemi geri alındı.",
-    ).catch(() => null);
-
-    await interaction.editReply(
-      "❌ Mesaiye giriş yapılamadı. Botun rolünü ve yetkilerini kontrol et.",
-    );
+    console.error("Görevde rolü verilemedi:", error);
+    const message = error instanceof Error ? error.message : String(error);
+    await interaction.editReply(`❌ Görevde rolü verilemedi: ${message}`);
     return;
+  }
+
+  let nicknameChanged = false;
+
+  if (member.manageable) {
+    nicknameChanged = await member
+      .setNickname(
+        nickname,
+        `Yetkili mesaiye girdi. Numara: ${number}`,
+      )
+      .then(() => true)
+      .catch((error: unknown) => {
+        console.warn("Takma ad değiştirilemedi:", error);
+        return false;
+      });
   }
 
   const startedAt = Date.now();
@@ -628,7 +619,9 @@ async function handleEnterDuty(
     [
       "✅ Mesaiye başarıyla girdin.",
       `🔢 Mesai numaran: **${number}**`,
-      `👤 Yeni ismin: **${nickname}**`,
+      nicknameChanged
+        ? `👤 Yeni ismin: **${nickname}**`
+        : "⚠️ Rolün verildi ancak Discord rol sırası nedeniyle ismin değiştirilemedi.",
     ].join("\n"),
   );
 }
@@ -668,13 +661,6 @@ async function handleExitDuty(
     return;
   }
 
-  if (!member.manageable) {
-    await interaction.editReply(
-      "❌ Bot takma adını değiştiremiyor. Bot rolünü senin en yüksek rolünün üzerine taşı.",
-    );
-    return;
-  }
-
   const number =
     settings.activeNumbers[member.id] ??
     Number.parseInt(
@@ -704,18 +690,23 @@ async function handleExitDuty(
       dutyRole,
       "Yetkili mesaiden çıktı.",
     );
-
-    await member.setNickname(
-      cleanName,
-      "Yetkili mesaiden çıktı.",
-    );
   } catch (error) {
-    console.error("Mesaiden çıkış işlemi başarısız:", error);
-
-    await interaction.editReply(
-      "❌ Mesaiden çıkış işlemi tamamlanamadı. Botun rolünü ve yetkilerini kontrol et.",
-    );
+    console.error("Görevde rolü kaldırılamadı:", error);
+    const message = error instanceof Error ? error.message : String(error);
+    await interaction.editReply(`❌ Görevde rolü kaldırılamadı: ${message}`);
     return;
+  }
+
+  let nicknameChanged = false;
+
+  if (member.manageable) {
+    nicknameChanged = await member
+      .setNickname(cleanName, "Yetkili mesaiden çıktı.")
+      .then(() => true)
+      .catch((error: unknown) => {
+        console.warn("Takma ad geri yüklenemedi:", error);
+        return false;
+      });
   }
 
   delete settings.activeNumbers[member.id];
@@ -765,6 +756,9 @@ async function handleExitDuty(
       Number.isSafeInteger(number)
         ? `🔢 **${number}** numarası artık yeniden kullanılabilir.`
         : "🔢 Mesai numarası kaldırıldı.",
+      nicknameChanged
+        ? "👤 Mesai işareti ve numarası isminden kaldırıldı."
+        : "⚠️ Rol kaldırıldı ancak Discord rol sırası nedeniyle ismin değiştirilemedi.",
     ].join("\n"),
   );
 }
@@ -839,12 +833,32 @@ export async function handleStaffSystemInteraction(
   }
 
   if (interaction.customId === ENTER_DUTY_BUTTON_ID) {
-    await handleEnterDuty(interaction);
+    try {
+      await handleEnterDuty(interaction);
+    } catch (error) {
+      console.error("Mesaiye girişte beklenmeyen hata:", error);
+      const message = error instanceof Error ? error.message : String(error);
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply(`❌ Mesaiye giriş hatası: ${message}`).catch(() => null);
+      } else {
+        await interaction.reply({ content: `❌ Mesaiye giriş hatası: ${message}`, ephemeral: true }).catch(() => null);
+      }
+    }
     return true;
   }
 
   if (interaction.customId === EXIT_DUTY_BUTTON_ID) {
-    await handleExitDuty(interaction);
+    try {
+      await handleExitDuty(interaction);
+    } catch (error) {
+      console.error("Mesaiden çıkışta beklenmeyen hata:", error);
+      const message = error instanceof Error ? error.message : String(error);
+      if (interaction.deferred || interaction.replied) {
+        await interaction.editReply(`❌ Mesaiden çıkış hatası: ${message}`).catch(() => null);
+      } else {
+        await interaction.reply({ content: `❌ Mesaiden çıkış hatası: ${message}`, ephemeral: true }).catch(() => null);
+      }
+    }
     return true;
   }
 
