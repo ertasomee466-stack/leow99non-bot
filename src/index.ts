@@ -109,6 +109,7 @@ const reservedCommandNames = new Set<string>([
   "komut-listesi",
   "kurulum",
   "yetkili-panel",
+  "yetkili-mesai-panel",
 ]);
 
 function normalizeCommandName(commandName: string): string {
@@ -358,6 +359,11 @@ function createBaseCommands() {
     .setDescription("Kayıt ve geçici oda sistemini bu sunucuda kurar veya onarır.")
     .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild);
 
+  const staffDutyPanelCommand = new SlashCommandBuilder()
+    .setName("yetkili-mesai-panel")
+    .setDescription("Yetkili görev panelini belirtilen kanala gönderir.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild);
+
   return [
     pingCommand,
     helpCommand,
@@ -374,6 +380,7 @@ function createBaseCommands() {
     removeCommand,
     commandList,
     setupCommand,
+    staffDutyPanelCommand,
   ];
 }
 
@@ -1091,6 +1098,196 @@ async function handleSetupCommand(
 }
 
 /* =========================================================
+   YETKİLİ GÖREV SİSTEMİ
+========================================================= */
+
+const STAFF_DUTY_CHANNEL_ID = "1531523283332370447";
+const STAFF_ROLE_ID = "1530910316899336395";
+const ON_DUTY_ROLE_ID = "1530910319185236118";
+
+type StaffDutySession = {
+  startedAt: number;
+  originalNickname: string | null;
+};
+
+const staffDutySessions = new Map<string, StaffDutySession>();
+
+function formatDutyDuration(milliseconds: number): string {
+  const totalMinutes = Math.max(0, Math.floor(milliseconds / 60_000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+
+  if (hours > 0) {
+    return `${hours} saat ${minutes} dakika`;
+  }
+
+  return `${minutes} dakika`;
+}
+
+async function sendStaffDutyLog(
+  interaction: Interaction,
+  content: string,
+): Promise<void> {
+  if (!interaction.guild) return;
+
+  const channel = await interaction.guild.channels
+    .fetch(STAFF_DUTY_CHANNEL_ID)
+    .catch(() => null);
+
+  if (channel?.isTextBased() && !channel.isDMBased()) {
+    await channel.send({ content }).catch(console.error);
+  }
+}
+
+async function handleStaffDutyPanelCommand(
+  interaction: ChatInputCommandInteraction,
+): Promise<void> {
+  if (!(await requireManageGuild(interaction)) || !interaction.guild) return;
+
+  const channel = await interaction.guild.channels
+    .fetch(STAFF_DUTY_CHANNEL_ID)
+    .catch(() => null);
+
+  if (!channel?.isTextBased() || channel.isDMBased()) {
+    await interaction.reply({
+      content: "❌ Yetkili görev kanalı bulunamadı.",
+      ephemeral: true,
+    });
+    return;
+  }
+
+  const embed = new EmbedBuilder()
+    .setColor("Green")
+    .setTitle("🛡️ Yetkili Görev Paneli")
+    .setDescription(
+      [
+        "Göreve başlamak veya görevden çıkmak için aşağıdaki butonları kullan.",
+        "",
+        `Bu paneli yalnızca <@&${STAFF_ROLE_ID}> rolündeki kişiler kullanabilir.`,
+      ].join("\n"),
+    );
+
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId("staff_duty_start")
+      .setLabel("Mesaiye Başla")
+      .setEmoji("🟢")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId("staff_duty_end")
+      .setLabel("Mesaiden Çık")
+      .setEmoji("🔴")
+      .setStyle(ButtonStyle.Danger),
+  );
+
+  await channel.send({ embeds: [embed], components: [row] });
+  await interaction.reply({
+    content: `✅ Yetkili görev paneli <#${STAFF_DUTY_CHANNEL_ID}> kanalına gönderildi.`,
+    ephemeral: true,
+  });
+}
+
+async function handleStaffDutyButton(interaction: Interaction): Promise<boolean> {
+  if (!interaction.isButton()) return false;
+  if (!["staff_duty_start", "staff_duty_end"].includes(interaction.customId)) {
+    return false;
+  }
+
+  if (!interaction.guild) {
+    await interaction.reply({
+      content: "❌ Bu buton yalnızca sunucuda kullanılabilir.",
+      ephemeral: true,
+    });
+    return true;
+  }
+
+  const member = await interaction.guild.members
+    .fetch(interaction.user.id)
+    .catch(() => null);
+
+  if (!member || !member.roles.cache.has(STAFF_ROLE_ID)) {
+    await interaction.reply({
+      content: "❌ Bu sistemi kullanmak için Yetkili rolüne sahip olmalısın.",
+      ephemeral: true,
+    });
+    return true;
+  }
+
+  const sessionKey = `${interaction.guild.id}:${member.id}`;
+
+  if (interaction.customId === "staff_duty_start") {
+    if (member.roles.cache.has(ON_DUTY_ROLE_ID)) {
+      await interaction.reply({
+        content: "ℹ️ Zaten mesaidesin.",
+        ephemeral: true,
+      });
+      return true;
+    }
+
+    const originalNickname = member.nickname;
+    const cleanName = member.displayName.replace(/^🟢\s*/, "");
+
+    await member.roles.add(ON_DUTY_ROLE_ID, "Yetkili mesaiye başladı.");
+    await member.setNickname(`🟢 ${cleanName}`, "Yetkili mesaiye başladı.")
+      .catch(() => null);
+
+    staffDutySessions.set(sessionKey, {
+      startedAt: Date.now(),
+      originalNickname,
+    });
+
+    await interaction.reply({
+      content: "🟢 Mesaiye başladın. Görevde rolün verildi.",
+      ephemeral: true,
+    });
+
+    await sendStaffDutyLog(
+      interaction,
+      `🟢 ${member} mesaiye başladı. • <t:${Math.floor(Date.now() / 1000)}:t>`,
+    );
+    return true;
+  }
+
+  if (!member.roles.cache.has(ON_DUTY_ROLE_ID)) {
+    await interaction.reply({
+      content: "ℹ️ Şu anda mesaide değilsin.",
+      ephemeral: true,
+    });
+    return true;
+  }
+
+  const session = staffDutySessions.get(sessionKey);
+  await member.roles.remove(ON_DUTY_ROLE_ID, "Yetkili mesaiden çıktı.");
+
+  if (session) {
+    await member.setNickname(session.originalNickname, "Yetkili mesaiden çıktı.")
+      .catch(() => null);
+  } else if (member.nickname?.startsWith("🟢 ")) {
+    await member.setNickname(
+      member.nickname.replace(/^🟢\s*/, "") || null,
+      "Yetkili mesaiden çıktı.",
+    ).catch(() => null);
+  }
+
+  const durationText = session
+    ? formatDutyDuration(Date.now() - session.startedAt)
+    : "Süre kaydı bulunamadı";
+
+  staffDutySessions.delete(sessionKey);
+
+  await interaction.reply({
+    content: `🔴 Mesaiden çıktın. Süre: **${durationText}**`,
+    ephemeral: true,
+  });
+
+  await sendStaffDutyLog(
+    interaction,
+    `🔴 ${member} mesaiden çıktı. • Süre: **${durationText}**`,
+  );
+  return true;
+}
+
+/* =========================================================
    INTERACTION YÖNETİCİSİ
 ========================================================= */
 
@@ -1098,6 +1295,10 @@ async function handleInteraction(
   interaction: Interaction,
 ): Promise<void> {
   if (await handleStaffSystemInteraction(interaction)) {
+    return;
+  }
+
+  if (await handleStaffDutyButton(interaction)) {
     return;
   }
 
@@ -1160,6 +1361,10 @@ async function handleInteraction(
 
     case "komut-listesi":
       await handleCommandList(interaction);
+      return;
+
+    case "yetkili-mesai-panel":
+      await handleStaffDutyPanelCommand(interaction);
       return;
 
     case "kurulum":
