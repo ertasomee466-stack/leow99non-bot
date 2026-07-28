@@ -4,3 +4,4 @@ dist/
 data/database.json
 *.log*.zip
 *.zip
+*.zip
