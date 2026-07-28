@@ -27,8 +27,9 @@ interface GuildStaffSettings {
   staffRoleId: string;
   dutyRoleId: string;
   panelChannelId: string;
-  nextNumber: number;
-  numbers: Record<string, number>;
+  logChannelId: string;
+  activeNumbers: Record<string, number>;
+  dutyStartedAt: Record<string, number>;
 }
 
 interface StaffDatabase {
@@ -52,9 +53,12 @@ const DUTY_ROLE_NAME = "Görevde";
 
 const CATEGORY_NAME = "YETKİLİ SİSTEMİ";
 const PANEL_CHANNEL_NAME = "yetkili-panel";
+const LOG_CHANNEL_NAME = "yetkili-mesai-log";
 
-const NUMBER_BUTTON_ID = "staff:number";
-const DUTY_BUTTON_ID = "staff:duty";
+const ENTER_DUTY_BUTTON_ID = "staff:mesai-gir";
+const EXIT_DUTY_BUTTON_ID = "staff:mesai-cik";
+
+const DUTY_PREFIX_REGEX = /^🟢\s*\[(\d+)\]\s*/u;
 
 /* =========================================================
    VERİTABANI
@@ -63,9 +67,7 @@ const DUTY_BUTTON_ID = "staff:duty";
 function loadDatabase(): StaffDatabase {
   try {
     if (!fs.existsSync(DATA_FILE)) {
-      return {
-        guilds: {},
-      };
+      return { guilds: {} };
     }
 
     const content = fs.readFileSync(DATA_FILE, "utf8");
@@ -76,19 +78,13 @@ function loadDatabase(): StaffDatabase {
     };
   } catch (error) {
     console.error("Yetkili sistemi veritabanı okunamadı:", error);
-
-    return {
-      guilds: {},
-    };
+    return { guilds: {} };
   }
 }
 
 function saveDatabase(): void {
   try {
-    fs.mkdirSync(DATA_DIRECTORY, {
-      recursive: true,
-    });
-
+    fs.mkdirSync(DATA_DIRECTORY, { recursive: true });
     fs.writeFileSync(
       DATA_FILE,
       JSON.stringify(database, null, 2),
@@ -106,14 +102,11 @@ const database: StaffDatabase = loadDatabase();
 ========================================================= */
 
 function cleanNickname(name: string): string {
-  const cleaned = name
-    .replace(/^\[\d+\]\s*-\s*/u, "")
-    .trim();
-
+  const cleaned = name.replace(DUTY_PREFIX_REGEX, "").trim();
   return cleaned || "Yetkili";
 }
 
-function createNickname(
+function createDutyNickname(
   number: number,
   member: GuildMember,
 ): string {
@@ -122,13 +115,45 @@ function createNickname(
     member.user.globalName ??
     member.user.username;
 
-  const prefix = `[${number}] - `;
+  const prefix = `🟢 [${number}] `;
   const cleanName = cleanNickname(currentName);
-
-  // Discord takma adı en fazla 32 karakter olabilir.
   const availableLength = Math.max(1, 32 - prefix.length);
 
   return `${prefix}${cleanName.slice(0, availableLength)}`;
+}
+
+function getLowestAvailableNumber(
+  settings: GuildStaffSettings,
+): number {
+  const usedNumbers = new Set(
+    Object.values(settings.activeNumbers)
+      .filter((number) => Number.isSafeInteger(number) && number > 0),
+  );
+
+  let number = 1;
+
+  while (usedNumbers.has(number)) {
+    number += 1;
+  }
+
+  return number;
+}
+
+function formatDuration(milliseconds: number): string {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1_000));
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours} saat ${minutes} dakika`;
+  }
+
+  if (minutes > 0) {
+    return `${minutes} dakika ${seconds} saniye`;
+  }
+
+  return `${seconds} saniye`;
 }
 
 async function findOrCreateRole(
@@ -149,7 +174,7 @@ async function findOrCreateRole(
 
   return guild.roles.create({
     name: roleName,
-    reason: "Yetkili sistemi kurulumu",
+    reason: "Yetkili mesai sistemi kurulumu",
   });
 }
 
@@ -166,6 +191,19 @@ async function findOrCreateCategory(
   );
 
   if (existingCategory) {
+    await existingCategory.permissionOverwrites.edit(
+      guild.roles.everyone,
+      { ViewChannel: false },
+    );
+
+    await existingCategory.permissionOverwrites.edit(
+      staffRole,
+      {
+        ViewChannel: true,
+        ReadMessageHistory: true,
+      },
+    );
+
     return existingCategory;
   }
 
@@ -185,32 +223,54 @@ async function findOrCreateCategory(
         ],
       },
     ],
-    reason: "Yetkili sistemi kurulumu",
+    reason: "Yetkili mesai sistemi kurulumu",
   });
 }
 
-async function findOrCreatePanelChannel(
+async function findOrCreateTextChannel(
   guild: Guild,
   staffRole: Role,
   category: CategoryChannel,
+  channelName: string,
+  topic: string,
 ): Promise<TextChannel> {
   await guild.channels.fetch();
 
   const existingChannel = guild.channels.cache.find(
     (channel): channel is TextChannel =>
       channel.type === ChannelType.GuildText &&
-      channel.name === PANEL_CHANNEL_NAME,
+      channel.name === channelName,
   );
 
   if (existingChannel) {
+    if (existingChannel.parentId !== category.id) {
+      await existingChannel.setParent(category.id);
+    }
+
+    await existingChannel.setTopic(topic).catch(() => null);
+
+    await existingChannel.permissionOverwrites.edit(
+      guild.roles.everyone,
+      { ViewChannel: false },
+    );
+
+    await existingChannel.permissionOverwrites.edit(
+      staffRole,
+      {
+        ViewChannel: true,
+        ReadMessageHistory: true,
+        SendMessages: false,
+      },
+    );
+
     return existingChannel;
   }
 
   return guild.channels.create({
-    name: PANEL_CHANNEL_NAME,
+    name: channelName,
     type: ChannelType.GuildText,
     parent: category.id,
-    topic: "Yetkili numarası ve görev alma paneli",
+    topic,
     permissionOverwrites: [
       {
         id: guild.roles.everyone.id,
@@ -225,7 +285,7 @@ async function findOrCreatePanelChannel(
         deny: [PermissionFlagsBits.SendMessages],
       },
     ],
-    reason: "Yetkili sistemi kurulumu",
+    reason: "Yetkili mesai sistemi kurulumu",
   });
 }
 
@@ -235,43 +295,73 @@ async function findOrCreatePanelChannel(
 
 function createPanelMessage() {
   const embed = new EmbedBuilder()
-    .setColor(0x5865f2)
-    .setTitle("Yetkili İşlem Paneli")
+    .setColor(0x2b2d31)
+    .setTitle("👮 Yetkili Mesai Paneli")
     .setDescription(
       [
-        "Aşağıdaki butonları kullanarak işlem yapabilirsin.",
+        "Görev durumunu aşağıdaki butonlardan yönetebilirsin.",
         "",
-        "🔢 **Numaramı Al**",
-        "Sana sıradaki yetkili numarasını verir ve ismini düzenler.",
+        "🟢 **Mesaiye Gir**",
+        "Görevde rolünü verir ve boş olan en küçük mesai numarasını atar.",
         "",
-        "📋 **Görev Al / Bırak**",
-        "Görevde rolünü verir. Tekrar bastığında rolünü kaldırır.",
+        "🔴 **Mesaiden Çık**",
+        "Görevde rolünü, yeşil işareti ve mesai numarasını kaldırır.",
       ].join("\n"),
     )
     .setFooter({
-      text: "Her yetkili yalnızca bir numara alabilir.",
+      text: "Numaralar 1'den başlar. Boşalan numara yeniden kullanılır.",
     })
     .setTimestamp();
 
   const buttons =
     new ActionRowBuilder<ButtonBuilder>().addComponents(
       new ButtonBuilder()
-        .setCustomId(NUMBER_BUTTON_ID)
-        .setLabel("Numaramı Al")
-        .setEmoji("🔢")
+        .setCustomId(ENTER_DUTY_BUTTON_ID)
+        .setLabel("Mesaiye Gir")
+        .setEmoji("🟢")
         .setStyle(ButtonStyle.Success),
 
       new ButtonBuilder()
-        .setCustomId(DUTY_BUTTON_ID)
-        .setLabel("Görev Al / Bırak")
-        .setEmoji("📋")
-        .setStyle(ButtonStyle.Primary),
+        .setCustomId(EXIT_DUTY_BUTTON_ID)
+        .setLabel("Mesaiden Çık")
+        .setEmoji("🔴")
+        .setStyle(ButtonStyle.Danger),
     );
 
   return {
     embeds: [embed],
     components: [buttons],
   };
+}
+
+async function removeOldPanels(
+  panelChannel: TextChannel,
+): Promise<void> {
+  const messages = await panelChannel.messages.fetch({
+    limit: 50,
+  }).catch(() => null);
+
+  if (!messages) {
+    return;
+  }
+
+  for (const message of messages.values()) {
+    if (!message.author.bot) {
+      continue;
+    }
+
+    const serializedComponents = JSON.stringify(
+      message.components.map((component) => component.toJSON()),
+    );
+
+    const containsStaffButton =
+      serializedComponents.includes('"custom_id":"staff:') ||
+      serializedComponents.includes('"custom_id":"yetkili_');
+
+    if (containsStaffButton) {
+      await message.delete().catch(() => null);
+    }
+  }
 }
 
 /* =========================================================
@@ -289,45 +379,36 @@ export async function ensureStaffSystemSetup(
     throw new Error("Botun sunucu üyelik bilgisi alınamadı.");
   }
 
-  if (
-    !botMember.permissions.has(PermissionFlagsBits.ManageRoles)
-  ) {
+  if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles)) {
     throw new Error("Botta Rolleri Yönet yetkisi bulunmuyor.");
   }
 
-  if (
-    !botMember.permissions.has(PermissionFlagsBits.ManageChannels)
-  ) {
+  if (!botMember.permissions.has(PermissionFlagsBits.ManageChannels)) {
     throw new Error("Botta Kanalları Yönet yetkisi bulunmuyor.");
   }
 
-  if (
-    !botMember.permissions.has(PermissionFlagsBits.ManageNicknames)
-  ) {
-    throw new Error(
-      "Botta Takma Adları Yönet yetkisi bulunmuyor.",
-    );
+  if (!botMember.permissions.has(PermissionFlagsBits.ManageNicknames)) {
+    throw new Error("Botta Takma Adları Yönet yetkisi bulunmuyor.");
   }
 
-  const staffRole = await findOrCreateRole(
-    guild,
-    STAFF_ROLE_NAME,
-  );
+  const staffRole = await findOrCreateRole(guild, STAFF_ROLE_NAME);
+  const dutyRole = await findOrCreateRole(guild, DUTY_ROLE_NAME);
+  const category = await findOrCreateCategory(guild, staffRole);
 
-  const dutyRole = await findOrCreateRole(
-    guild,
-    DUTY_ROLE_NAME,
-  );
-
-  const category = await findOrCreateCategory(
-    guild,
-    staffRole,
-  );
-
-  const panelChannel = await findOrCreatePanelChannel(
+  const panelChannel = await findOrCreateTextChannel(
     guild,
     staffRole,
     category,
+    PANEL_CHANNEL_NAME,
+    "Yetkililerin mesaiye giriş ve çıkış paneli",
+  );
+
+  const logChannel = await findOrCreateTextChannel(
+    guild,
+    staffRole,
+    category,
+    LOG_CHANNEL_NAME,
+    "Yetkili mesai giriş ve çıkış kayıtları",
   );
 
   const previousSettings = database.guilds[guild.id];
@@ -336,14 +417,15 @@ export async function ensureStaffSystemSetup(
     staffRoleId: staffRole.id,
     dutyRoleId: dutyRole.id,
     panelChannelId: panelChannel.id,
-    nextNumber: previousSettings?.nextNumber ?? 1,
-    numbers: previousSettings?.numbers ?? {},
+    logChannelId: logChannel.id,
+    activeNumbers: previousSettings?.activeNumbers ?? {},
+    dutyStartedAt: previousSettings?.dutyStartedAt ?? {},
   };
 
   database.guilds[guild.id] = settings;
   saveDatabase();
 
-  // TextChannel olduğu kesin olduğu için send hatası oluşmaz.
+  await removeOldPanels(panelChannel);
   await panelChannel.send(createPanelMessage());
 
   return settings;
@@ -356,7 +438,7 @@ export async function ensureStaffSystemSetup(
 export const staffSystemCommands = [
   new SlashCommandBuilder()
     .setName("yetkili-panel")
-    .setDescription("Yetkili sistemini kurar ve paneli gönderir.")
+    .setDescription("Yetkili mesai sistemini kurar ve paneli gönderir.")
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageGuild,
     ),
@@ -375,7 +457,6 @@ async function requireStaff(
     await interaction.editReply(
       "❌ Bu işlem yalnızca bir sunucuda kullanılabilir.",
     );
-
     return null;
   }
 
@@ -383,9 +464,8 @@ async function requireStaff(
 
   if (!settings) {
     await interaction.editReply(
-      "❌ Yetkili sistemi kurulu değil. Bir yönetici `/yetkili-panel` komutunu kullanmalı.",
+      "❌ Yetkili sistemi kurulu değil. Bir yönetici `/kurulum` komutunu kullanmalı.",
     );
-
     return null;
   }
 
@@ -397,7 +477,6 @@ async function requireStaff(
     await interaction.editReply(
       "❌ Sunucudaki üyelik bilgin alınamadı.",
     );
-
     return null;
   }
 
@@ -405,100 +484,33 @@ async function requireStaff(
     await interaction.editReply(
       "❌ Bu butonu kullanmak için Yetkili rolüne sahip olmalısın.",
     );
-
     return null;
   }
 
-  return {
-    member,
-    settings,
-  };
+  return { member, settings };
+}
+
+async function getLogChannel(
+  guild: Guild,
+  settings: GuildStaffSettings,
+): Promise<TextChannel | null> {
+  const channel = await guild.channels
+    .fetch(settings.logChannelId)
+    .catch(() => null);
+
+  return channel?.type === ChannelType.GuildText
+    ? channel
+    : null;
 }
 
 /* =========================================================
-   NUMARAMI AL BUTONU
+   MESAİYE GİR
 ========================================================= */
 
-async function handleNumberButton(
+async function handleEnterDuty(
   interaction: ButtonInteraction,
 ): Promise<void> {
-  await interaction.deferReply({
-    ephemeral: true,
-  });
-
-  const result = await requireStaff(interaction);
-
-  if (!result) {
-    return;
-  }
-
-  const { member, settings } = result;
-
-  const existingNumber = settings.numbers[member.id];
-
-  if (existingNumber !== undefined) {
-    await interaction.editReply(
-      `ℹ️ Zaten **${existingNumber}** numarasına sahipsin.`,
-    );
-
-    return;
-  }
-
-  if (!member.manageable) {
-    await interaction.editReply(
-      [
-        "❌ Bot senin takma adını değiştiremiyor.",
-        "",
-        "Botun rolünü Yetkili rolünün ve senin en yüksek rolünün üzerine taşı.",
-        "Sunucu sahibinin takma adı bot tarafından değiştirilemez.",
-      ].join("\n"),
-    );
-
-    return;
-  }
-
-  const number = settings.nextNumber;
-  const nickname = createNickname(number, member);
-
-  try {
-    await member.setNickname(
-      nickname,
-      `Yetkili numarası verildi: ${number}`,
-    );
-  } catch (error) {
-    console.error("Yetkili takma adı değiştirilemedi:", error);
-
-    await interaction.editReply(
-      "❌ Takma adın değiştirilemedi. Bot rolünün yeterince yukarıda olduğundan emin ol.",
-    );
-
-    return;
-  }
-
-  settings.numbers[member.id] = number;
-  settings.nextNumber += 1;
-
-  saveDatabase();
-
-  await interaction.editReply(
-    [
-      "✅ Yetkili numaran başarıyla verildi.",
-      `🔢 Numaran: **${number}**`,
-      `👤 Yeni ismin: **${nickname}**`,
-    ].join("\n"),
-  );
-}
-
-/* =========================================================
-   GÖREV AL / BIRAK BUTONU
-========================================================= */
-
-async function handleDutyButton(
-  interaction: ButtonInteraction,
-): Promise<void> {
-  await interaction.deferReply({
-    ephemeral: true,
-  });
+  await interaction.deferReply({ ephemeral: true });
 
   const result = await requireStaff(interaction);
 
@@ -514,9 +526,8 @@ async function handleDutyButton(
 
   if (!dutyRole) {
     await interaction.editReply(
-      "❌ Görevde rolü bulunamadı. `/yetkili-panel` komutunu tekrar kullan.",
+      "❌ Görevde rolü bulunamadı. `/kurulum` komutunu tekrar kullan.",
     );
-
     return;
   }
 
@@ -524,39 +535,238 @@ async function handleDutyButton(
     await interaction.editReply(
       "❌ Bot Görevde rolünü yönetemiyor. Bot rolünü Görevde rolünün üzerine taşı.",
     );
-
     return;
   }
 
+  if (!member.manageable) {
+    await interaction.editReply(
+      [
+        "❌ Bot senin takma adını değiştiremiyor.",
+        "",
+        "Botun rolünü Yetkili rolünün ve senin en yüksek rolünün üzerine taşı.",
+        "Sunucu sahibinin takma adı bot tarafından değiştirilemez.",
+      ].join("\n"),
+    );
+    return;
+  }
+
+  if (member.roles.cache.has(dutyRole.id)) {
+    const currentNumber = settings.activeNumbers[member.id];
+
+    await interaction.editReply(
+      currentNumber
+        ? `ℹ️ Zaten mesaidesin. Mesai numaran: **${currentNumber}**`
+        : "ℹ️ Zaten mesaidesin.",
+    );
+    return;
+  }
+
+  const number = getLowestAvailableNumber(settings);
+  const nickname = createDutyNickname(number, member);
+
   try {
-    if (member.roles.cache.has(dutyRole.id)) {
-      await member.roles.remove(
-        dutyRole,
-        "Yetkili görevden çıktı.",
-      );
-
-      await interaction.editReply(
-        "✅ Görevden çıktın. Görevde rolün kaldırıldı.",
-      );
-
-      return;
-    }
-
     await member.roles.add(
       dutyRole,
-      "Yetkili göreve başladı.",
+      `Yetkili mesaiye girdi. Numara: ${number}`,
     );
 
-    await interaction.editReply(
-      "✅ Göreve başladın. Görevde rolün verildi.",
+    await member.setNickname(
+      nickname,
+      `Yetkili mesaiye girdi. Numara: ${number}`,
     );
   } catch (error) {
-    console.error("Görev rolü işlemi başarısız:", error);
+    console.error("Mesaiye giriş işlemi başarısız:", error);
+
+    await member.roles.remove(
+      dutyRole,
+      "Mesaiye giriş işlemi geri alındı.",
+    ).catch(() => null);
 
     await interaction.editReply(
-      "❌ Görev rolü işlemi yapılamadı. Botun rol ve yetkilerini kontrol et.",
+      "❌ Mesaiye giriş yapılamadı. Botun rolünü ve yetkilerini kontrol et.",
     );
+    return;
   }
+
+  const startedAt = Date.now();
+
+  settings.activeNumbers[member.id] = number;
+  settings.dutyStartedAt[member.id] = startedAt;
+  saveDatabase();
+
+  const logChannel = await getLogChannel(
+    interaction.guild,
+    settings,
+  );
+
+  if (logChannel) {
+    const logEmbed = new EmbedBuilder()
+      .setColor(0x57f287)
+      .setTitle("🟢 Mesaiye Giriş")
+      .addFields(
+        {
+          name: "Yetkili",
+          value: `${member}`,
+          inline: true,
+        },
+        {
+          name: "Mesai numarası",
+          value: String(number),
+          inline: true,
+        },
+        {
+          name: "Başlangıç",
+          value: `<t:${Math.floor(startedAt / 1_000)}:F>`,
+        },
+      )
+      .setTimestamp();
+
+    await logChannel.send({ embeds: [logEmbed] }).catch(() => null);
+  }
+
+  await interaction.editReply(
+    [
+      "✅ Mesaiye başarıyla girdin.",
+      `🔢 Mesai numaran: **${number}**`,
+      `👤 Yeni ismin: **${nickname}**`,
+    ].join("\n"),
+  );
+}
+
+/* =========================================================
+   MESAİDEN ÇIK
+========================================================= */
+
+async function handleExitDuty(
+  interaction: ButtonInteraction,
+): Promise<void> {
+  await interaction.deferReply({ ephemeral: true });
+
+  const result = await requireStaff(interaction);
+
+  if (!result || !interaction.guild) {
+    return;
+  }
+
+  const { member, settings } = result;
+
+  const dutyRole = await interaction.guild.roles
+    .fetch(settings.dutyRoleId)
+    .catch(() => null);
+
+  if (!dutyRole) {
+    await interaction.editReply(
+      "❌ Görevde rolü bulunamadı. `/kurulum` komutunu tekrar kullan.",
+    );
+    return;
+  }
+
+  if (!member.roles.cache.has(dutyRole.id)) {
+    await interaction.editReply(
+      "ℹ️ Şu anda mesaide değilsin.",
+    );
+    return;
+  }
+
+  if (!member.manageable) {
+    await interaction.editReply(
+      "❌ Bot takma adını değiştiremiyor. Bot rolünü senin en yüksek rolünün üzerine taşı.",
+    );
+    return;
+  }
+
+  const number =
+    settings.activeNumbers[member.id] ??
+    Number.parseInt(
+      (
+        member.nickname ??
+        member.user.globalName ??
+        member.user.username
+      ).match(DUTY_PREFIX_REGEX)?.[1] ?? "",
+      10,
+    );
+
+  const startedAt = settings.dutyStartedAt[member.id];
+  const endedAt = Date.now();
+  const duration = startedAt
+    ? formatDuration(endedAt - startedAt)
+    : "Bilinmiyor";
+
+  const currentName =
+    member.nickname ??
+    member.user.globalName ??
+    member.user.username;
+
+  const cleanName = cleanNickname(currentName).slice(0, 32);
+
+  try {
+    await member.roles.remove(
+      dutyRole,
+      "Yetkili mesaiden çıktı.",
+    );
+
+    await member.setNickname(
+      cleanName,
+      "Yetkili mesaiden çıktı.",
+    );
+  } catch (error) {
+    console.error("Mesaiden çıkış işlemi başarısız:", error);
+
+    await interaction.editReply(
+      "❌ Mesaiden çıkış işlemi tamamlanamadı. Botun rolünü ve yetkilerini kontrol et.",
+    );
+    return;
+  }
+
+  delete settings.activeNumbers[member.id];
+  delete settings.dutyStartedAt[member.id];
+  saveDatabase();
+
+  const logChannel = await getLogChannel(
+    interaction.guild,
+    settings,
+  );
+
+  if (logChannel) {
+    const logEmbed = new EmbedBuilder()
+      .setColor(0xed4245)
+      .setTitle("🔴 Mesaiden Çıkış")
+      .addFields(
+        {
+          name: "Yetkili",
+          value: `${member}`,
+          inline: true,
+        },
+        {
+          name: "Boşalan numara",
+          value: Number.isSafeInteger(number)
+            ? String(number)
+            : "Bilinmiyor",
+          inline: true,
+        },
+        {
+          name: "Toplam mesai",
+          value: duration,
+        },
+        {
+          name: "Çıkış",
+          value: `<t:${Math.floor(endedAt / 1_000)}:F>`,
+        },
+      )
+      .setTimestamp();
+
+    await logChannel.send({ embeds: [logEmbed] }).catch(() => null);
+  }
+
+  await interaction.editReply(
+    [
+      "✅ Mesaiden başarıyla çıktın.",
+      `⏱️ Toplam mesai süren: **${duration}**`,
+      Number.isSafeInteger(number)
+        ? `🔢 **${number}** numarası artık yeniden kullanılabilir.`
+        : "🔢 Mesai numarası kaldırıldı.",
+    ].join("\n"),
+  );
 }
 
 /* =========================================================
@@ -578,13 +788,10 @@ async function handlePanelCommand(
         "❌ Bu komutu kullanmak için Sunucuyu Yönet yetkisine sahip olmalısın.",
       ephemeral: true,
     });
-
     return;
   }
 
-  await interaction.deferReply({
-    ephemeral: true,
-  });
+  await interaction.deferReply({ ephemeral: true });
 
   try {
     const settings = await ensureStaffSystemSetup(
@@ -592,10 +799,14 @@ async function handlePanelCommand(
     );
 
     await interaction.editReply(
-      `✅ Yetkili sistemi hazırlandı.\n📍 Panel: <#${settings.panelChannelId}>`,
+      [
+        "✅ Yetkili mesai sistemi hazırlandı.",
+        `📍 Panel: <#${settings.panelChannelId}>`,
+        `📜 Log: <#${settings.logChannelId}>`,
+      ].join("\n"),
     );
   } catch (error) {
-    console.error("Yetkili sistemi kurulamadı:", error);
+    console.error("Yetkili mesai sistemi kurulamadı:", error);
 
     const errorMessage =
       error instanceof Error
@@ -627,13 +838,13 @@ export async function handleStaffSystemInteraction(
     return false;
   }
 
-  if (interaction.customId === NUMBER_BUTTON_ID) {
-    await handleNumberButton(interaction);
+  if (interaction.customId === ENTER_DUTY_BUTTON_ID) {
+    await handleEnterDuty(interaction);
     return true;
   }
 
-  if (interaction.customId === DUTY_BUTTON_ID) {
-    await handleDutyButton(interaction);
+  if (interaction.customId === EXIT_DUTY_BUTTON_ID) {
+    await handleExitDuty(interaction);
     return true;
   }
 
