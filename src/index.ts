@@ -1203,23 +1203,46 @@ client.once(Events.ClientReady, (readyClient) => {
 
 
 client.on(Events.MessageCreate, async (message) => {
-  if (message.author.bot || !message.inGuild()) {
-    return;
+  if (message.author.bot || !message.inGuild()) return;
+
+  const text = message.content.toLocaleLowerCase("tr-TR").trim();
+
+  const replies: Record<string, string> = {
+    "sa":"as",
+    "selam":"as",
+    "slm":"as",
+    "ali":"italiy",
+    "m?z":"meyra zana",
+    "napıyon":"iyiyim sen",
+    "nbr":"iyidir senden",
+    "nasılsın":"iyiyim sen",
+    "iyi misin":"iyiyim 😄",
+    "günaydın":"günaydın ❤️",
+    "iyi geceler":"iyi geceler 🌙",
+    "bb":"görüşürüz 👋",
+    "bye":"kendine iyi bak 👋",
+    "efm":"efendim?",
+    "bot":"buradayım 👀",
+    "ping":"pong 🏓",
+    "xd":"😂",
+    "sj":"😄",
+    "o7":"o7",
+    "eyw":"rica ederim ❤️",
+    "tşk":"ne demek ❤️",
+    "teşekkürler":"her zaman ❤️",
+    "gel":"geliyorum 🏃",
+    "31":"🤨",
+    "aşk":"❤️",
+    "kedi":"🐱",
+    "köpek":"🐶",
+  };
+
+  for (const [word, reply] of Object.entries(replies)) {
+    if (text.includes(word)) {
+      await message.reply(reply).catch(console.error);
+      break;
+    }
   }
-
-  const normalizedMessage = message.content
-    .trim()
-    .toLocaleLowerCase("tr-TR")
-    .replace(/[.!?,;:]+$/u, "")
-    .trim();
-
-  if (normalizedMessage !== "sa") {
-    return;
-  }
-
-  await message.reply("as").catch((error: unknown) => {
-    console.error("❌ sa/as cevabı gönderilemedi:", error);
-  });
 });
 
 client.on(Events.InteractionCreate, (interaction) => {
